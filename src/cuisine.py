@@ -630,26 +630,26 @@ def package_clean_yum(package=None):
 
 @dispatch('python_package')
 def python_package_upgrade(package):
-	'''
+    '''
     Upgrades the defined python package.
     '''
 
 @dispatch('python_package')
 def python_package_install(package=None):
-	'''
+    '''
     Installs the given python package/list of python packages.
     '''
 
 @dispatch('python_package')
 def python_package_ensure(package):
-	'''
+    '''
     Tests if the given python package is installed, and installes it in
-	case it's not already there.
+    case it's not already there.
     '''
 
 @dispatch('python_package')
 def python_package_remove(package):
-	'''
+    '''
     Removes the given python package.
     '''
 
@@ -657,26 +657,23 @@ def python_package_remove(package):
 # PIP PYTHON PACKAGE MANAGER
 # -----------------------------------------------------------------------------
 
-def python_package_upgrade_pip(package,E=None):
+def python_package_upgrade_pip(package,pip=None):
     '''
     The "package" argument, defines the name of the package that will be upgraded.
-    The optional argument "E" is equivalent to the "-E" parameter of pip. E is the
-    path to a virtualenv. If provided, it will be added to the pip call.
+    The optional argument "pip" should refer to an pip script. This can be used 
+    to install it into a virtualenv (no matter if it is activated or not). 
     '''
-    if E:
-        E='-E %s' %E
-    else:
-        E=''   
-    run('pip upgrade %s %s' %(E,package))
+    pip=pip or fabric.api.env.env.get('pip','pip')  
+    run('%s upgrade %s' %(E,package))
 
 def python_package_install_pip(package=None,r=None,pip=None):
     '''
     The "package" argument, defines the name of the package that will be installed.
     The argument "r" referes to the requirements file that will be used by pip and
-    is equivalent to the "-r" parameter of pip.
-    Either "package" or "r" needs to be provided
-    The optional argument "E" is equivalent to the "-E" parameter of pip. E is the
-    path to a virtualenv. If provided, it will be added to the pip call.
+    is equivalent to the "-r" parameter of pip. Either "package" or "r" needs to 
+    be provided. The optional argument "pip" should refer to an pip script. This 
+    can be used to install it into a virtualenv (no matter if it is activated or 
+    not). 
     '''
     pip=pip or fabric.api.env.env.get('pip','pip')
     if package:
@@ -690,10 +687,9 @@ def python_package_ensure_pip(package=None,r=None, pip=None):
     '''
     The "package" argument, defines the name of the package that will be ensured.
     The argument "r" referes to the requirements file that will be used by pip and
-    is equivalent to the "-r" parameter of pip.
-    Either "package" or "r" needs to be provided
-    The optional argument "E" is equivalent to the "-E" parameter of pip. E is the
-    path to a virtualenv. If provided, it will be added to the pip call.
+    is equivalent to the "-r" parameter of pip. Either "package" or "r" needs to be provided
+    The optional argument "pip" should refer to an pip script. This can be used 
+    to install it into a virtualenv (no matter if it is activated or not). 
     '''
     #FIXME: At the moment, I do not know how to check for the existence of a pip package and
     # I am not sure if this really makes sense, based on the pip built in functionality. 
@@ -701,14 +697,13 @@ def python_package_ensure_pip(package=None,r=None, pip=None):
     pip=pip or fabric.api.env.env.get('pip','pip')
     python_package_install_pip(package,r,pip)
 
-def python_package_remove_pip(package, E=None):
+def python_package_remove_pip(package, pip=None):
     '''
-    The "package" argument, defines the name of the package that will be ensured.
+    The "package" argument, defines the name of the package that will be removed.
     The argument "r" referes to the requirements file that will be used by pip and
-    is equivalent to the "-r" parameter of pip.
-    Either "package" or "r" needs to be provided
-    The optional argument "E" is equivalent to the "-E" parameter of pip. E is the
-    path to a virtualenv. If provided, it will be added to the pip call. 
+    is equivalent to the "-r" parameter of pip. Either "package" or "r" needs to be provided
+    The optional argument "pip" should refer to an pip script. This can be used 
+    to uninstall from a virtualenv (no matter if it is activated or not). 
     '''
     pip=pip or fabric.api.env.env.get('pip','pip')
     return run('%s uninstall %s' %(pip,package))
