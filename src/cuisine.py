@@ -5,10 +5,11 @@
 # Author    : Sebastien Pierre                            <sebastien@ffctn.com>
 # Author    : Thierry Stiegler   (gentoo port)     <thierry.stiegler@gmail.com>
 # Author    : Jim McCoy (distro checks and rpm port)      <jim.mccoy@gmail.com>
+# Author    : Warren Moore (zypper package)               <warren@wamonite.com>
 # License   : Revised BSD License
 # -----------------------------------------------------------------------------
 # Creation  : 26-Apr-2010
-# Last mod  : 30-Jul-2012
+# Last mod  : 20-Sep-2012
 # -----------------------------------------------------------------------------
 
 """
@@ -39,10 +40,10 @@ See also:
 """
 
 from __future__ import with_statement
-import base64, bz2, hashlib, os, random, sys, re, string, tempfile, subprocess, types, functools, StringIO
+import base64, gzip, hashlib, os, re, string, tempfile, subprocess, types, functools, StringIO
 import fabric, fabric.api, fabric.operations, fabric.context_managers
 
-VERSION         = "0.3.2"
+VERSION         = "0.4.2"
 RE_SPACES       = re.compile("[\s\t]+")
 MAC_EOL         = "\n"
 UNIX_EOL        = "\n"
@@ -53,12 +54,12 @@ SUDO_PASSWORD   = "CUISINE_SUDO_PASSWORD"
 OPTION_PACKAGE  = "CUISINE_OPTION_PACKAGE"
 OPTION_PYTHON_PACKAGE  = "CUISINE_OPTION_PYTHON_PACKAGE"
 AVAILABLE_OPTIONS = dict(
-	package=["apt", "yum"],
-    python_package=["easy_install","pip"]
+	package=["apt", "yum", "zypper"],
+	python_package=["easy_install","pip"]
 )
 DEFAULT_OPTIONS = dict(
 	package="apt",
-    python_package="pip"
+	python_package="pip"
 )
 
 
@@ -78,14 +79,14 @@ class __mode_switcher(object):
 	MODE_VALUE = True
 	MODE_KEY   = None
 
-	def __init__( self ):
+	def __init__( self, value=None ):
 		self.oldMode = fabric.api.env.get(self.MODE_KEY)
-		fabric.api.env[self.MODE_KEY] = self.MODE_VALUE
+		fabric.api.env[self.MODE_KEY] = self.MODE_VALUE if value is None else value
 
 	def __enter__(self):
 		pass
 
-	def __exit__(self, *args, **kwargs):
+	def __exit__(self, type, value, traceback):
 		if self.oldMode is None:
 			del fabric.api.env[self.MODE_KEY]
 		else:
@@ -128,20 +129,20 @@ def is_sudo():   return mode(MODE_SUDO)
 #
 # =============================================================================
 
-def select_package( option=None ):
-	"""Selects the type of package subsystem to use (ex:apt or yum)."""
+def select_package( selection=None ):
+	"""Selects the type of package subsystem to use (ex:apt, yum or zypper)."""
 	supported = AVAILABLE_OPTIONS["package"]
-	if not (option is None):
-		assert option in supported, "Option must be one of: %s"  % (supported)
-		fabric.api.env[OPTION_PACKAGE] = option
+	if not (selection is None):
+		assert selection in supported, "Option must be one of: %s"  % (supported)
+		fabric.api.env[OPTION_PACKAGE] = selection
 	return (fabric.api.env[OPTION_PACKAGE], supported)
 
-def select_python_package( option=None ):
-    supported = AVAILABLE_OPTIONS["python_package"]
-    if not (option is None):
-        assert option in supported, "Option must be one of: %s"  % (supported)
-        fabric.api.env[OPTION_PYTHON_PACKAGE] = option
-    return (fabric.api.env[OPTION_PYTHON_PACKAGE], supported)
+def select_python_package( selection=None ):
+	supported = AVAILABLE_OPTIONS["python_package"]
+	if not (selection is None):
+		assert selection in supported, "Option must be one of: %s"  % (supported)
+		fabric.api.env[OPTION_PYTHON_PACKAGE] = selection
+	return (fabric.api.env[OPTION_PYTHON_PACKAGE], supported)
 # =============================================================================
 #
 # RUN/SUDO METHODS
@@ -153,7 +154,7 @@ def run_local(command, sudo=False, shell=True, pty=True, combine_stderr=None):
 	Local implementation of fabric.api.run() using subprocess.
 
 	Note: pty option exists for function signature compatibility and is
-	      ignored.
+	ignored.
 	"""
 	if combine_stderr is None: combine_stderr = fabric.api.env.combine_stderr
 	# TODO: Pass the SUDO_PASSWORD variable to the command here
@@ -302,7 +303,7 @@ def text_ensure_line(text, *lines):
 	the end of it."""
 	eol = text_detect_eol(text)
 	res = list(text.split(eol))
-	if res[0] is '' and len(res) is 1:
+	if res[0] == '' and len(res) == 1:
 		res = list()
 	for line in lines:
 		assert line.find(eol) == -1, "No EOL allowed in lines parameter: " + repr(line)
@@ -392,26 +393,43 @@ def file_write(location, content, mode=None, owner=None, group=None, sudo=None, 
 	location, optionally setting mode/owner/group."""
 	# FIXME: Big files are never transferred properly!
 	# Gets the content signature and write it to a secure tempfile
-	use_sudo = is_sudo() or sudo
+	use_sudo       = is_sudo() or sudo
 	sig            = hashlib.sha256(content).hexdigest()
 	fd, local_path = tempfile.mkstemp()
 	os.write(fd, content)
 	# Upload the content if necessary
 	if not file_exists(location) or sig != file_sha256(location):
 		if is_local():
-			run('cp "%s" "%s"'%(local_path,location))
+			with mode_sudo(sudo):
+				run('cp "%s" "%s"'%(local_path,location))
 		else:
-			fabric.operations.put(local_path, location, use_sudo=use_sudo)
+			# FIXME: Put is not working properly, I often get stuff like:
+			# Fatal error: sudo() encountered an error (return code 1) while executing 'mv "3dcf7213c3032c812769e7f355e657b2df06b687" "/etc/authbind/byport/80"'
+			#fabric.operations.put(local_path, location, use_sudo=use_sudo)
+			# Hides the output, which is especially important
+			with fabric.context_managers.settings(
+				fabric.api.hide('warnings', 'running', 'stdout'),
+				warn_only=True,
+				**{MODE_SUDO: use_sudo}
+			):
+				# We send the data as BZipped Base64
+				with mode_sudo(sudo):
+					result = run("echo '%s' | base64 -d | gunzip > \"%s\"" % (base64.b64encode(gzip.zlib.compress(content)), location))
+				if result.failed:
+					fabric.api.abort('Encountered error writing the file %s: %s' % (location, result))
+
 	# Remove the local temp file
 	os.close(fd)
 	os.unlink(local_path)
 	# Ensures that the signature matches
 	if check:
-		file_sig = file_sha256(location)
-		assert sig == file_sig, "File content does not matches file: %s, got %s, expects %s" % (location, sig, file_sig)
-	file_attribs(location, mode=mode, owner=owner, group=group)
+		with mode_sudo(sudo):
+			file_sig = file_sha256(location)
+		assert sig == file_sig, "File content does not matches file: %s, got %s, expects %s" % (location, repr(file_sig), repr(sig))
+	with mode_sudo(sudo):
+		file_attribs(location, mode=mode, owner=owner, group=group)
 
-def file_ensure(location, mode=None, owner=None, group=None, recursive=False):
+def file_ensure(location, mode=None, owner=None, group=None):
 	"""Updates the mode/owner/group for the remote file at the given
 	location."""
 	if file_exists(location):
@@ -467,6 +485,7 @@ def file_link(source, destination, symbolic=True, mode=None, owner=None, group=N
 	optionally setting its mode/owner/group."""
 	if file_exists(destination) and (not file_is_link(destination)):
 		raise Exception("Destination already exists and is not a link: %s" % (destination))
+	# FIXME: Should resolve the link first before unlinking
 	if file_is_link(destination):
 		file_unlink(destination)
 	if symbolic:
@@ -480,7 +499,8 @@ def file_sha256(location):
 	# NOTE: In some cases, sudo can output errors in here -- but the errors will
 	# appear before the result, so we simply split and get the last line to
 	# be on the safe side.
-	return run('sha256sum "%s" | cut -d" " -f1' % (location)).replace("\n","").strip()
+	sig = run('sha256sum "%s" | cut -d" " -f1' % (location)).split("\n")
+	return sig[-1].strip()
 
 # =============================================================================
 #
@@ -521,9 +541,6 @@ def package_upgrade():
 def package_update(package=None):
 	"""Updates the package database (when no argument) or update the package
 	or list of packages given as argument."""
-@dispatch
-def package_update(package=None):
-	"""Upgrade the system."""
 
 @dispatch
 def package_install(package, update=False):
@@ -547,9 +564,6 @@ def package_clean(package=None):
 def repository_ensure_apt(repository):
 	sudo("add-apt-repository " + repository)
 
-def package_upgrade_apt():
-	sudo("apt-get --yes upgrade")
-
 def package_update_apt(package=None):
 	if package == None:
 		sudo("apt-get --yes update")
@@ -558,7 +572,7 @@ def package_update_apt(package=None):
 			package = " ".join(package)
 		sudo("apt-get --yes upgrade " + package)
 
-def package_upgrade_apt(package=None):
+def package_upgrade_apt():
 	sudo("apt-get --yes upgrade")
 
 def package_install_apt(package, update=False):
@@ -578,7 +592,7 @@ def package_ensure_apt(package, update=False):
 		return True
 
 def package_clean_apt(package=None):
-    pass
+	pass
 
 # -----------------------------------------------------------------------------
 # YUM PACKAGE (RedHat, CentOS)
@@ -589,25 +603,22 @@ def repository_ensure_yum(repository):
 	raise Exception("Not implemented for Yum")
 
 def package_upgrade_yum():
-	sudo("yum --assumeyes update")
+	sudo("yum -y update")
 
 def package_update_yum(package=None):
 	if package == None:
-		sudo("yum --assumeyes update")
+		sudo("yum -y update")
 	else:
 		if type(package) in (list, tuple):
 			package = " ".join(package)
-		sudo("yum --assumeyes upgrade " + package)
-
-def package_upgrade_yum(package=None):
-	sudo("yum --assumeyes upgrade")
+		sudo("yum -y upgrade " + package)
 
 def package_install_yum(package, update=False):
 	if update:
-		sudo("yum --assumeyes update")
+		sudo("yum -y update")
 	if type(package) in (list, tuple):
 		package = " ".join(package)
-	sudo("yum --assumeyes install %s" % (package))
+	sudo("yum -y install %s" % (package))
 
 def package_ensure_yum(package, update=False):
 	status = run("yum list installed %s ; true" % package)
@@ -619,8 +630,51 @@ def package_ensure_yum(package, update=False):
 		return True
 
 def package_clean_yum(package=None):
-	sudo("yum --assumeyes clean all")
+	sudo("yum -y clean all")
 
+# -----------------------------------------------------------------------------
+# ZYPPER PACKAGE (openSUSE)
+# -----------------------------------------------------------------------------
+
+def repository_ensure_zypper(repository):
+	repository_uri = repository
+	if repository[-1] != '/':
+		repository_uri = repository.rpartition("/")[0]
+	status = run("zypper --non-interactive --gpg-auto-import-keys repos -d")
+	if status.find(repository_uri) == -1:
+		sudo("zypper --non-interactive --gpg-auto-import-keys addrepo " + repository)
+		sudo("zypper --non-interactive --gpg-auto-import-keys modifyrepo --refresh " + repository_uri)
+
+def package_upgrade_zypper():
+	sudo("zypper --non-interactive --gpg-auto-import-keys update --type package")
+
+def package_update_zypper(package=None):
+	if package == None:
+		sudo("zypper --non-interactive --gpg-auto-import-keys refresh")
+	else:
+		if type(package) in (list, tuple):
+			package = " ".join(package)
+		sudo("zypper --non-interactive --gpg-auto-import-keys update --type package " + package)
+
+def package_install_zypper(package, update=False):
+	if update:
+		package_update_zypper()
+	if type(package) in (list, tuple):
+		package = " ".join(package)
+	sudo("zypper --non-interactive --gpg-auto-import-keys install --type package --name " + package)
+
+def package_ensure_zypper(package, update=False):
+	status = run("zypper --non-interactive --gpg-auto-import-keys search --type package --installed-only --match-exact %s ; true" % package)
+	if status.find("No packages found.") != -1 or status.find(package) == -1:
+		package_install_zypper(package)
+		return False
+	else:
+		if update:
+			package_update_zypper(package)
+		return True
+
+def package_clean_zypper():
+	sudo("zypper --non-interactive clean")
 
 # =============================================================================
 #
@@ -630,6 +684,7 @@ def package_clean_yum(package=None):
 
 @dispatch('python_package')
 def python_package_upgrade(package):
+<<<<<<< HEAD
     '''
     Upgrades the defined python package.
     '''
@@ -652,11 +707,36 @@ def python_package_remove(package):
     '''
     Removes the given python package.
     '''
+=======
+	'''
+	Upgrades the defined python package.
+	'''
+
+@dispatch('python_package')
+def python_package_install(package=None):
+	'''
+	Installs the given python package/list of python packages.
+	'''
+
+@dispatch('python_package')
+def python_package_ensure(package):
+	'''
+	Tests if the given python package is installed, and installes it in
+	case it's not already there.
+	'''
+
+@dispatch('python_package')
+def python_package_remove(package):
+	'''
+	Removes the given python package.
+	'''
+>>>>>>> 6d0880b1b13b8f65f7cee601d481f90eebf7da78
 
 # -----------------------------------------------------------------------------
 # PIP PYTHON PACKAGE MANAGER
 # -----------------------------------------------------------------------------
 
+<<<<<<< HEAD
 def python_package_upgrade_pip(package,pip=None):
     '''
     The "package" argument, defines the name of the package that will be upgraded.
@@ -707,6 +787,63 @@ def python_package_remove_pip(package, pip=None):
     '''
     pip=pip or fabric.api.env.get('pip','pip')
     return run('%s uninstall %s' %(pip,package))
+=======
+def python_package_upgrade_pip(package,E=None):
+	'''
+	The "package" argument, defines the name of the package that will be upgraded.
+	The optional argument "E" is equivalent to the "-E" parameter of pip. E is the
+	path to a virtualenv. If provided, it will be added to the pip call.
+	'''
+	if E:
+		E='-E %s' %E
+	else:
+		E=''   
+	run('pip upgrade %s %s' %(E,package))
+
+def python_package_install_pip(package=None,r=None,pip=None):
+	'''
+	The "package" argument, defines the name of the package that will be installed.
+	The argument "r" referes to the requirements file that will be used by pip and
+	is equivalent to the "-r" parameter of pip.
+	Either "package" or "r" needs to be provided
+	The optional argument "E" is equivalent to the "-E" parameter of pip. E is the
+	path to a virtualenv. If provided, it will be added to the pip call.
+	'''
+	pip=pip or fabric.api.env.get('pip','pip')
+	if package:
+		run('%s install %s' %(pip,package))
+	elif r:
+		run('%s install -r %s' %(pip,r))
+	else:
+		raise Exception("Either a package name or the requirements file has to be provided.")
+
+def python_package_ensure_pip(package=None,r=None, pip=None):
+	'''
+	The "package" argument, defines the name of the package that will be ensured.
+	The argument "r" referes to the requirements file that will be used by pip and
+	is equivalent to the "-r" parameter of pip.
+	Either "package" or "r" needs to be provided
+	The optional argument "E" is equivalent to the "-E" parameter of pip. E is the
+	path to a virtualenv. If provided, it will be added to the pip call.
+	'''
+	#FIXME: At the moment, I do not know how to check for the existence of a pip package and
+	# I am not sure if this really makes sense, based on the pip built in functionality. 
+	# So I just call the install functions
+	pip=pip or fabric.api.env.get('pip','pip')
+	python_package_install_pip(package,r,pip)
+
+def python_package_remove_pip(package, E=None, pip=None):
+	'''
+	The "package" argument, defines the name of the package that will be ensured.
+	The argument "r" referes to the requirements file that will be used by pip and
+	is equivalent to the "-r" parameter of pip.
+	Either "package" or "r" needs to be provided
+	The optional argument "E" is equivalent to the "-E" parameter of pip. E is the
+	path to a virtualenv. If provided, it will be added to the pip call. 
+	'''
+	pip=pip or fabric.api.env.get('pip','pip')
+	return run('%s uninstall %s' %(pip,package))
+>>>>>>> 6d0880b1b13b8f65f7cee601d481f90eebf7da78
 
 
 # -----------------------------------------------------------------------------
@@ -714,32 +851,32 @@ def python_package_remove_pip(package, pip=None):
 # -----------------------------------------------------------------------------
 
 def python_package_upgrade_easy_install(package):
-    '''
-    The "package" argument, defines the name of the package that will be upgraded.
-    '''
-    run('easy_install --upgrade %s' %package)
+	'''
+	The "package" argument, defines the name of the package that will be upgraded.
+	'''
+	run('easy_install --upgrade %s' %package)
 
 def python_package_install_easy_install(package):
-    '''
-    The "package" argument, defines the name of the package that will be installed.
-    '''
-    sudo('easy_install %s' %package)
+	'''
+	The "package" argument, defines the name of the package that will be installed.
+	'''
+	sudo('easy_install %s' %package)
 
 def python_package_ensure_easy_install(package):
-    '''
-    The "package" argument, defines the name of the package that will be ensured.
-    '''
-    #FIXME: At the moment, I do not know how to check for the existence of a py package and
-    # I am not sure if this really makes sense, based on the easy_install built in functionality. 
-    # So I just call the install functions
-    python_package_install_easy_install(package)
+	'''
+	The "package" argument, defines the name of the package that will be ensured.
+	'''
+	#FIXME: At the moment, I do not know how to check for the existence of a py package and
+	# I am not sure if this really makes sense, based on the easy_install built in functionality. 
+	# So I just call the install functions
+	python_package_install_easy_install(package)
 
 def python_package_remove_easy_install(package):
-    '''
-    The "package" argument, defines the name of the package that will be removed.
-    '''
-    #FIXME: this will not remove egg file etc.
-    run('easy_install -m %s' %package) 
+	'''
+	The "package" argument, defines the name of the package that will be removed.
+	'''
+	#FIXME: this will not remove egg file etc.
+	run('easy_install -m %s' %package) 
 
 # =============================================================================
 #
@@ -798,20 +935,25 @@ def user_create(name, passwd=None, home=None, uid=None, gid=None, shell=None,
 	if passwd:
 		user_passwd(name,passwd,encrypted_passwd)
 
-def user_check(name):
+def user_check(name=None, uid=None):
 	"""Checks if there is a user defined with the given name,
 	returning its information as a
 	'{"name":<str>,"uid":<str>,"gid":<str>,"home":<str>,"shell":<str>}'
 	or 'None' if the user does not exists."""
-	d = sudo("cat /etc/passwd | egrep '^%s:' ; true" % (name))
-	s = sudo("cat /etc/shadow | egrep '^%s:' | awk -F':' '{print $2}'" % (name))
+	assert name!=None or uid!=None,     "user_check: either `uid` or `name` should be given"
+	assert name is None or uid is None,"user_check: `uid` and `name` both given, only one should be provided"
+	if   name != None:
+		d = sudo("cat /etc/passwd | egrep '^%s:' ; true" % (name))
+	elif uid != None:
+		d = sudo("cat /etc/passwd | egrep '^.*:.*:%s:' ; true" % (uid))
 	results = {}
+	s = None
 	if d:
 		d = d.split(":")
 		assert len(d) >= 7, "/etc/passwd entry is expected to have at least 7 fields, got %s in: %s" % (len(d), ":".join(d))
 		results = dict(name=d[0], uid=d[2], gid=d[3], home=d[5], shell=d[6])
-	if s:
-		results['passwd'] = s
+		s = sudo("cat /etc/shadow | egrep '^%s:' | awk -F':' '{print $2}'" % (results['name']))
+		if s: results['passwd'] = s
 	if results:
 		return results
 	else:
@@ -991,7 +1133,10 @@ def locale_ensure(locale):
 		sudo("dpkg-reconfigure locales")
 
 # Sets up the default options so that @dispatch'ed functions work
-for option, value in DEFAULT_OPTIONS.items():
-	eval("select_" + option)(value)
+def _init():
+	for option, value in DEFAULT_OPTIONS.items():
+		eval("select_" + option)(value)
+
+_init()
 
 # EOF - vim: ts=4 sw=4 noet
